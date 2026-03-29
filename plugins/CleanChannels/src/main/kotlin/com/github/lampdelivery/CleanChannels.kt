@@ -3,18 +3,26 @@ package com.github.lampdelivery
 import android.content.Context
 import android.os.Bundle
 import android.text.Editable
+import android.text.SpannableStringBuilder
 import android.text.TextWatcher
 import android.view.View
 import android.view.ViewGroup
+import android.widget.LinearLayout
 import android.widget.TextView
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.api.SettingsAPI
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
+import com.aliucord.patcher.after
 import com.aliucord.settings.delegate
+import com.aliucord.utils.ReflectUtils
 import com.aliucord.widgets.BottomSheet
+import com.discord.databinding.WidgetGuildProfileSheetBinding
 import com.discord.views.CheckedSetting
+import com.discord.widgets.guilds.profile.WidgetGuildProfileSheet
+import com.discord.widgets.guilds.profile.WidgetGuildProfileSheetViewModel
+import java.text.Normalizer
 import java.util.WeakHashMap
 
 @AliucordPlugin
@@ -25,6 +33,9 @@ class CleanChannels : Plugin() {
     private var hideSymbols by settings.delegate(true)
     private var capitalizeCategories by settings.delegate(true)
     private var removeEmojis by settings.delegate(true)
+    private var normalizeLetters by settings.delegate(true)
+    private var showWhitelistToggle by settings.delegate(true)
+    private val whitelist by settings.delegate(mutableSetOf<Long>())
 
     private var categoryId = 0
     private var inputId = 0
@@ -97,6 +108,30 @@ class CleanChannels : Plugin() {
             }
         } catch (_: Throwable) {}
 
+        try {
+            val draweeTextViewClass = Class.forName("com.discord.utilities.view.text.SimpleDraweeSpanTextView")
+            val setDraweeMethod = draweeTextViewClass.declaredMethods.find { it.name == "setDraweeSpanStringBuilder" }
+            if (setDraweeMethod != null) {
+                patcher.patch(setDraweeMethod, Hook { param ->
+                    val tv = param.thisObject as? TextView ?: return@Hook
+                    if (targetIds.contains(tv.id) || isHeader(tv)) {
+                        val builder = param.args[0] as? CharSequence ?: return@Hook
+                        val original = builder.toString()
+                        val cleaned = cleanName(original, tv)
+                        if (cleaned != original) {
+                            try {
+                                val draweeBuilderClass = Class.forName("com.facebook.drawee.span.DraweeSpanStringBuilder")
+                                val newnewBuilder = draweeBuilderClass.getConstructor(CharSequence::class.java).newInstance(cleaned)
+                                param.args[0] = newnewBuilder
+                            } catch (_: Throwable) {
+                                param.args[0] = SpannableStringBuilder(cleaned)
+                            }
+                        }
+                    }
+                })
+            }
+        } catch (_: Throwable) {}
+
         val headerClasses = listOf(
             "com.discord.widgets.home.WidgetHome",
             "com.discord.widgets.chat.sidepanel.WidgetChatSidePanel",
@@ -111,7 +146,7 @@ class CleanChannels : Plugin() {
                     if (method.name == "setActionBarTitle" && method.parameterTypes.size == 1 && method.parameterTypes[0] == CharSequence::class.java) {
                         patcher.patch(method, Hook { cf ->
                             val title = cf.args[0] as? CharSequence ?: return@Hook
-                            cf.args[0] = cleanName(title, isCategory = false, isHint = false, isHeader = true)
+                            cf.args[0] = cleanName(title, isCategory = false, isHint = false, isHeader = true, isThread = false, isVoice = false)
                         })
                     } else if (method.name == "configure" || method.name == "configureUI" || method.name == "updateUI") {
                         patcher.patch(method, Hook { cf ->
@@ -133,10 +168,50 @@ class CleanChannels : Plugin() {
             getHintMethods.forEach { method ->
                 patcher.patch(method, Hook { param ->
                     val res = param.result as? CharSequence ?: return@Hook
-                    param.result = cleanName(res, isCategory = false, isHint = true, isHeader = false)
+                    param.result = cleanName(res, isCategory = false, isHint = true, isHeader = false, isThread = false, isVoice = false)
                 })
             }
         } catch (_: Throwable) {}
+
+        patcher.after<WidgetGuildProfileSheet>(
+            "configureTabItems",
+            Long::class.java,
+            WidgetGuildProfileSheetViewModel.TabItems::class.java,
+            Boolean::class.java
+        ) {
+            if (!showWhitelistToggle) return@after
+            val guildId = it.args[0] as Long
+            val fragment = it.thisObject as WidgetGuildProfileSheet
+            
+            val binding = ReflectUtils.getMethodByArgs(WidgetGuildProfileSheet::class.java, "getBinding").invoke(fragment) as WidgetGuildProfileSheetBinding
+            val layout = binding.f.getRootView() as ViewGroup
+            
+            val secondaryActionsId = Utils.getResId("guild_profile_sheet_secondary_actions", "id")
+            val container = layout.findViewById<View>(secondaryActionsId) as? ViewGroup ?: return@after
+            val actionsLayout = container.getChildAt(0) as? LinearLayout ?: return@after
+            
+            if (actionsLayout.findViewWithTag<View>("clean_channels_toggle") != null) return@after
+
+            val context = actionsLayout.context
+            val setting = Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, "Clean Channels", null).apply {
+                tag = "clean_channels_toggle"
+                isChecked = !whitelist.contains(guildId)
+                setOnCheckedListener { checked ->
+                    if (checked) {
+                        whitelist.remove(guildId)
+                    } else {
+                        whitelist.add(guildId)
+                    }
+                    settings.setObject("whitelist", whitelist)
+                }
+            }
+            
+            val changeNicknameId = Utils.getResId("guild_profile_sheet_change_nickname", "id")
+            val changeNicknameView = actionsLayout.findViewById<View?>(changeNicknameId)
+            val index = if (changeNicknameView != null) actionsLayout.indexOfChild(changeNicknameView) else 0
+            
+            actionsLayout.addView(setting, index)
+        }
     }
 
     private fun getResId(name: String): Int {
@@ -184,8 +259,7 @@ class CleanChannels : Plugin() {
             val res = tv.context?.resources ?: tv.resources ?: return false
             val idName = res.getResourceEntryName(id) ?: ""
             idName.contains("toolbar") || idName.contains("header") || idName.contains("topic") || 
-            idName.contains("side_bar") || idName.contains("side_panel") || idName.contains("channel_name") ||
-            idName.contains("actions_title") || idName == "name" || idName == "title"
+            idName.contains("actions_title") || idName == "title"
         } catch (_: Throwable) { isInsideDrawer(tv) }
     }
 
@@ -202,13 +276,41 @@ class CleanChannels : Plugin() {
         return false
     }
 
+    private fun isPoll(tv: TextView): Boolean {
+        val id = tv.id
+        if (id == 0 || id == View.NO_ID) return false
+        return try {
+            tv.resources.getResourceEntryName(id).contains("poll")
+        } catch (_: Throwable) { false }
+    }
+
+    private fun isThread(tv: TextView): Boolean {
+        val id = tv.id
+        if (id == 0 || id == View.NO_ID) return false
+        return try {
+            tv.resources.getResourceEntryName(id).contains("thread")
+        } catch (_: Throwable) { false }
+    }
+
+    private fun isVoice(tv: TextView): Boolean {
+        val id = tv.id
+        if (id == 0 || id == View.NO_ID) return false
+        return try {
+            tv.resources.getResourceEntryName(id).contains("voice")
+        } catch (_: Throwable) { false }
+    }
+
     private fun applyCleaningSafely(tv: TextView) {
+        if (isPoll(tv)) return
+        val guildId = com.discord.stores.StoreStream.getGuildSelected().selectedGuildId
+        if (whitelist.contains(guildId)) return
+        
         val id = tv.id
         val isHint = id == inputId
         val original = (if (isHint) tv.hint else tv.text) ?: return
         if (original.isEmpty()) return
         
-        val cleaned = cleanName(original, id == categoryId, isHint, isHeader(tv))
+        val cleaned = cleanName(original, tv)
         if (cleaned != original.toString()) {
             if (isHint) tv.hint = cleaned else tv.text = cleaned
         }
@@ -238,38 +340,54 @@ class CleanChannels : Plugin() {
     private fun isDash(cp: Int): Boolean {
         if (cp == '-'.code || cp == 0x2D || cp == 45) return true
         val type = Character.getType(cp).toByte()
-        return type == Character.DASH_PUNCTUATION || cp == '\u2212'.code || 
-               cp == 0x2010 || cp == 0x2011 || cp == 0x2012 || cp == 0x2013 || cp == 0x2014 || cp == 0x2015
+        return type == Character.DASH_PUNCTUATION || cp == '\u2212'.code ||
+               cp in 0x2010..0x2015
     }
 
-    private fun cleanName(name: CharSequence, isCategory: Boolean, isHint: Boolean, isHeader: Boolean): String {
-        val str = name.toString()
+    private fun cleanName(name: CharSequence, tv: TextView): String {
+        return cleanName(
+            name, 
+            isCategory = tv.id == categoryId, 
+            isHint = tv.id == inputId, 
+            isHeader = isHeader(tv),
+            isThread = isThread(tv),
+            isVoice = isVoice(tv)
+        )
+    }
+
+    private fun cleanName(name: CharSequence, isCategory: Boolean, isHint: Boolean, isHeader: Boolean, isThread: Boolean, isVoice: Boolean): String {
+        var str = name.toString()
+        if (normalizeLetters) {
+            str = Normalizer.normalize(str, Normalizer.Form.NFKD).replace(Regex("\\p{M}"), "")
+        }
         val cleaned = StringBuilder()
         
         var i = 0
         while (i < str.length) {
             val cp = str.codePointAt(i)
             val charCount = Character.charCount(cp)
+            val c = str[i]
             
             val dash = isDash(cp)
             val emoji = isEmoji(cp)
+            
+            val isStrictAN = (cp in 'a'.code..'z'.code) || (cp in 'A'.code..'Z'.code) || (cp in '0'.code..'9'.code)
             
             val keep = when {
                 dash -> true
                 emoji -> !removeEmojis
                 hideSymbols -> {
-                    val isAlphaNumeric = (cp in 'a'.code..'z'.code) || (cp in 'A'.code..'Z'.code) || (cp in '0'.code..'9'.code)
                     if (isHint || isHeader) {
-                        isAlphaNumeric || cp == ' '.code || cp == '#'.code || cp == '@'.code || dash
-                    } else if (isCategory) {
-                        isAlphaNumeric || cp == ' '.code || dash
+                        isStrictAN || c == ' ' || c == '#' || c == '@' || dash
+                    } else if (isCategory || isThread || isVoice) {
+                        isStrictAN || c == ' ' || dash
                     } else {
-                        isAlphaNumeric || dash
+                        isStrictAN || dash
                     }
                 }
                 else -> {
-                    Character.isLetterOrDigit(cp) || cp == ' '.code || cp == '_'.code || 
-                    cp == '#'.code || cp == '.'.code || cp == '@'.code || dash
+                    Character.isLetterOrDigit(cp) || c == ' ' || c == '_' || 
+                    c == '#' || c == '.' || c == '@' || dash
                 }
             }
             
@@ -306,9 +424,19 @@ class CleanChannels : Plugin() {
                 setOnCheckedListener { settings.setBool("hideSymbols", it) }
             })
 
+            addView(Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, "Normalize letters", "Converts special characters (like fancy script) to standard letters.").apply {
+                isChecked = settings.getBool("normalizeLetters", true)
+                setOnCheckedListener { settings.setBool("normalizeLetters", it) }
+            })
+
             addView(Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, "Capitalize categories", "Uniformly capitalize categories (e.g. Category).").apply {
                 isChecked = settings.getBool("capitalizeCategories", true)
                 setOnCheckedListener { settings.setBool("capitalizeCategories", it) }
+            })
+
+            addView(Utils.createCheckedSetting(context, CheckedSetting.ViewType.SWITCH, "Show menu toggle", "Show the Clean Channels toggle in the server's three-dot menu.").apply {
+                isChecked = settings.getBool("showWhitelistToggle", true)
+                setOnCheckedListener { settings.setBool("showWhitelistToggle", it) }
             })
         }
     }
