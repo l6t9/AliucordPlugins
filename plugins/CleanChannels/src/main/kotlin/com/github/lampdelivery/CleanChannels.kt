@@ -304,12 +304,15 @@ class CleanChannels : Plugin() {
         if (isPoll(tv)) return
         val guildId = com.discord.stores.StoreStream.getGuildSelected().selectedGuildId
         if (whitelist.contains(guildId)) return
-        
+
         val id = tv.id
         val isHint = id == inputId
         val original = (if (isHint) tv.hint else tv.text) ?: return
         if (original.isEmpty()) return
-        
+
+        val text = original.toString()
+        if (text.matches(Regex("^\\d+/\\d+$"))) return
+
         val cleaned = cleanName(original, tv)
         if (cleaned != original.toString()) {
             if (isHint) tv.hint = cleaned else tv.text = cleaned

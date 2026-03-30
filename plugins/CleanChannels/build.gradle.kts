@@ -1,4 +1,4 @@
-version = "1.0.1"
+version = "1.0.2"
 description = "Removes emojis and symbols from channel names, and more"
 
 aliucord.changelog.set("""
