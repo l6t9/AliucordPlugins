@@ -72,6 +72,7 @@ class ModernProfiles : Plugin() {
         val showCreatedAt = settings.getBool("createdAt", true)
         val showJoinedAt = settings.getBool("joinedAt", true)
         val showDaysAgo = settings.getBool("showDaysAgo", true)
+        val showLastMessage = settings.getBool("lastMessage", true)
         val useProfileButtonColor = settings.getBool("profileButtonColor", true)
         val stackProfileButtons = settings.getBool("stackProfileButtons", true)
 
@@ -999,9 +1000,9 @@ class ModernProfiles : Plugin() {
                     }
                 }
 
-                if (showCreatedAt || showJoinedAt) {
+                if (showCreatedAt || showJoinedAt || showLastMessage) {
                     try {
-                        UserDetailsHelper.addMemberDetails(root, model.user, showCreatedAt, showJoinedAt, showDaysAgo)
+                        UserDetailsHelper.addMemberDetails(root, model.user, showCreatedAt, showJoinedAt, showDaysAgo, showLastMessage)
                     } catch (_: Throwable) {
                     }
                 }
@@ -1009,5 +1010,8 @@ class ModernProfiles : Plugin() {
         }
     }
 
-    override fun stop(context: Context) = patcher.unpatchAll()
+    override fun stop(context: Context) {
+        patcher.unpatchAll()
+        UserDetailsHelper.cleanup()
+    }
 }

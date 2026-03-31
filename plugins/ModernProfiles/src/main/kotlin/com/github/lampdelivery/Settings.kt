@@ -106,6 +106,21 @@ class Settings(private val settings: SettingsAPI) : SettingsPage() {
                 .createCheckedSetting(
                     ctx,
                     CheckedSetting.ViewType.SWITCH,
+                    "Show 'Last Message' info",
+                    "Display when the user last sent a message in the current channel/server."
+                ).apply {
+                    isChecked = settings.getBool("lastMessage", true)
+                    setOnCheckedListener {
+                        settings.setBool("lastMessage", it)
+                    }
+                }
+        )
+
+        addView(
+            Utils
+                .createCheckedSetting(
+                    ctx,
+                    CheckedSetting.ViewType.SWITCH,
                     "Use primary color for profile buttons",
                     "Apply the primary profile color to all profile-related buttons except message action."
                 ).apply {
