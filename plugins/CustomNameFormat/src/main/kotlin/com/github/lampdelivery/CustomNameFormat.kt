@@ -1,10 +1,7 @@
 package com.github.lampdelivery
 
-import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Paint
 import android.text.TextUtils
-import android.util.TypedValue
 import android.widget.TextView
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
@@ -61,15 +58,11 @@ class CustomNameFormat : Plugin() {
                 val textView = param.thisObject as? TextView ?: return@after
                 val text = param.args[0]?.toString() ?: return@after
 
-                val isTrackedText = synchronized(formattedTexts) { formattedTexts.contains(text) }
-                if (isTrackedText || isUsernameFormat(text)) {
-                    applyTextStyling(textView, text)
-                }
-
                 if (!settings.getBool("enableMarquee", false)) return@after
 
                 if (text.length <= settings.getInt("maxLength", 20)) return@after
 
+                val isTrackedText = synchronized(formattedTexts) { formattedTexts.contains(text) }
                 if (!(isTrackedText || isUsernameFormat(text))) return@after
 
                 setMarquee(textView)
@@ -221,8 +214,6 @@ class CustomNameFormat : Plugin() {
                         }
                     }
 
-                    applyTextStyling(usernameTextView, formatted)
-
                     if (settings.getBool("enableMarquee", false) && formatted.length > settings.getInt(
                             "maxLength",
                             20
@@ -264,45 +255,6 @@ class CustomNameFormat : Plugin() {
             isHorizontalFadingEdgeEnabled = true
             setHorizontallyScrolling(true)
         }
-    }
-
-    private fun applyTextStyling(textView: TextView, text: String) {
-        val customTextSize = settings.getFloat("chatTextSize", 16f)
-        val adaptiveSizeEnabled = settings.getBool("enableAdaptiveSize", false)
-
-        if (adaptiveSizeEnabled) {
-            val optimalSize = calculateAdaptiveTextSize(textView, text, customTextSize)
-            textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, optimalSize)
-        } else {
-            textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, customTextSize)
-        }
-    }
-
-    private fun calculateAdaptiveTextSize(textView: TextView, text: String, baseSize: Float): Float {
-        val maxWidth = textView.width
-        if (maxWidth <= 0) return baseSize
-
-        val minSize = 8f
-        var currentSize = baseSize
-
-        val paint = Paint(textView.paint)
-
-        while (currentSize > minSize) {
-            paint.textSize = TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_SP,
-                currentSize,
-                textView.context.resources.displayMetrics
-            )
-
-            val textWidth = paint.measureText(text)
-            if (textWidth <= maxWidth) {
-                break
-            }
-
-            currentSize -= 0.5f
-        }
-
-        return maxOf(currentSize, minSize)
     }
 
     object ReflectionExtensions {
@@ -407,7 +359,7 @@ class CustomNameFormat : Plugin() {
     }
 
     private fun truncateText(text: String, maxLength: Int): String {
-        if (settings.getBool("enableMarquee", false) || settings.getBool("enableAdaptiveSize", false)) {
+        if (settings.getBool("enableMarquee", false)) {
             return text
         }
 

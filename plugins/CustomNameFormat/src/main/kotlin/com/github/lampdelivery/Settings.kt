@@ -9,13 +9,10 @@ import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
-import androidx.core.content.res.ResourcesCompat
-import com.aliucord.Constants
 import com.aliucord.Utils
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.utils.DimenUtils.dp
 import com.aliucord.views.TextInput
-import com.discord.utilities.color.ColorCompat
 import com.discord.views.CheckedSetting
 import com.discord.views.RadioManager
 import com.lytefast.flexinput.R
@@ -317,7 +314,6 @@ class Settings(private val settings: com.aliucord.api.SettingsAPI) : SettingsPag
         val lengthLabel = TextView(context, null, 0, R.i.UiKit_TextView).apply {
             text = "Maximum length: $currentLength characters"
             textSize = 16f
-            typeface = ResourcesCompat.getFont(context, Constants.Fonts.whitney_medium)
             layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
                 bottomMargin = 4.dp
             }
@@ -345,60 +341,5 @@ class Settings(private val settings: com.aliucord.api.SettingsAPI) : SettingsPag
         }
         sliderContainer.addView(lengthSlider)
         addView(sliderContainer)
-
-        addView(
-            TextView(context, null, 0, R.i.UiKit_Settings_Item_Header).apply {
-                text = "Text Appearance"
-                gravity = Gravity.START
-            }
-        )
-
-        val currentTextSize = settings.getFloat("chatTextSize", 14f)
-
-        val textSizeContainer = LinearLayout(context, null, 0, R.i.UiKit_Settings_Item).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-
-        val textSizeLabel = TextView(context, null, 0, R.i.UiKit_TextView).apply {
-            text = "Text Size: ${currentTextSize.toInt()}sp"
-            textSize = 16f
-            typeface = ResourcesCompat.getFont(context, Constants.Fonts.whitney_medium)
-            layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                bottomMargin = 4.dp
-            }
-        }
-        textSizeContainer.addView(textSizeLabel)
-
-        val textSizeSlider = SeekBar(context, null, 0, R.i.UiKit_SeekBar).apply {
-            max = 16
-            progress = (currentTextSize - 8f).toInt()
-            setPadding(12.dp, 0, 12.dp, 0)
-
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    val newSize = progress + 8
-                    textSizeLabel.text = "Text Size: ${newSize}sp"
-                }
-
-                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    val newSize = ((seekBar?.progress ?: 0) + 8).toFloat()
-                    settings.setFloat("chatTextSize", newSize)
-                }
-            })
-        }
-        textSizeContainer.addView(textSizeSlider)
-        addView(textSizeContainer)
-
-        val adaptiveSizeToggle = Utils.createCheckedSetting(
-            context,
-            CheckedSetting.ViewType.SWITCH,
-            "Adaptive Text Sizing",
-            "Automatically adjust text size to fit within available space"
-        )
-        adaptiveSizeToggle.isChecked = settings.getBool("enableAdaptiveSize", false)
-        adaptiveSizeToggle.setOnCheckedListener { settings.setBool("enableAdaptiveSize", it) }
-        addView(adaptiveSizeToggle)
     }
 }
