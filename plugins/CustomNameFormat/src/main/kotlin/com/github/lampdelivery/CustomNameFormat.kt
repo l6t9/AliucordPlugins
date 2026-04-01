@@ -2,157 +2,419 @@ package com.github.lampdelivery
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.os.Bundle
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
+import android.graphics.Paint
+import android.text.TextUtils
+import android.util.TypedValue
+import android.widget.TextView
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
-import com.discord.models.member.GuildMember
-import com.discord.models.user.User as ModelUser
+import com.aliucord.patcher.after
+import com.aliucord.Utils
+import com.aliucord.wrappers.users.globalName
 import com.discord.api.channel.Channel
-import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemEmbed
+import com.discord.databinding.*
+import com.discord.models.member.GuildMember
+import com.discord.models.user.User
 import com.discord.stores.StoreStream
 import com.discord.utilities.user.UserUtils
-import com.aliucord.wrappers.users.globalName
+import com.discord.views.UsernameView
+import com.discord.widgets.channels.memberlist.adapter.ChannelMembersListAdapter
+import com.discord.widgets.channels.memberlist.adapter.ChannelMembersListViewHolderMember
+import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemEmbed
+import java.lang.reflect.Field
 
 @AliucordPlugin
 class CustomNameFormat : Plugin() {
     enum class Format {
-        NICKNAME_USERNAME,
-        NICKNAME_TAG,
+        DEFAULT,
         USERNAME,
-        USERNAME_NICKNAME,
         DISPLAYNAME_USERNAME,
-        DISPLAYNAME_TAG,
-        USERNAME_DISPLAYNAME
+        USERNAME_DISPLAYNAME,
+        NICKNAME_USERNAME,
+        USERNAME_NICKNAME
     }
 
-    override fun start(context: Context) {
-        // Patch for getNickOrUsername removed to prevent build errors if GuildMember$Companion does not exist
+    enum class Separator {
+        PARENTHESES,
+        BRACKETS,
+        PIPES,
+        BULLETS,
+        DASHES,
+        CUSTOM
+    }
 
-        patcher.patch(
-            WidgetChatListAdapterItemEmbed::class.java.getDeclaredMethod("getModel", Any::class.java, Any::class.java),
-            Hook { param ->
-                val mapResult = param.result
-                if (mapResult !is MutableMap<*, *>) return@Hook
-                if (mapResult.isEmpty()) return@Hook
-                val users = StoreStream.getUsers().users
-                for ((idAny, valueAny) in mapResult) {
-                    val id = idAny as? Long ?: continue
-                    val value = valueAny as? String ?: continue
-                    val user = users[id] as? ModelUser ?: continue
+    enum class CasingMode {
+        NONE,
+        PROPER_CASE,
+        LOWER_CASE,
+        UPPER_CASE
+    }
+
+    private val formattedTexts = mutableSetOf<String>()
+
+    override fun start(context: Context) {
+        ReflectionExtensions.init()
+
+        try {
+            patcher.after<TextView>("setText", CharSequence::class.java, TextView.BufferType::class.java) { param ->
+                val textView = param.thisObject as? TextView ?: return@after
+                val text = param.args[0]?.toString() ?: return@after
+
+                val isTrackedText = synchronized(formattedTexts) { formattedTexts.contains(text) }
+                if (isTrackedText || isUsernameFormat(text)) {
+                    applyTextStyling(textView, text)
+                }
+
+                if (!settings.getBool("enableMarquee", false)) return@after
+
+                if (text.length <= settings.getInt("maxLength", 20)) return@after
+
+                if (!(isTrackedText || isUsernameFormat(text))) return@after
+
+                setMarquee(textView)
+            }
+        } catch (e: Exception) {
+        }
+
+        try {
+            patcher.patch(
+                GuildMember.Companion::class.java.getDeclaredMethod(
+                    "getNickOrUsername",
+                    com.discord.models.user.User::class.java,
+                    GuildMember::class.java,
+                    Channel::class.java,
+                    List::class.java
+                ),
+                Hook { param ->
+                    val format = Format.valueOf(settings.getString("format", Format.DEFAULT.name))
+                    if (format == Format.DEFAULT) return@Hook
+
+                    if (!settings.getBool("displayInChat", true)) return@Hook
+
+                    val user = param.args[0] as? com.discord.models.user.User ?: return@Hook
                     val username = user.username
-                    (mapResult as MutableMap<Any?, Any?>)[id] = getFormatted(username, value, user)
+                    val result = param.result as? String ?: username
+
+                    val formatted = getFormatted(username, result, user)
+                    param.result = formatted
+
+                    synchronized(formattedTexts) {
+                        formattedTexts.add(formatted)
+                        if (formattedTexts.size > 1000) {
+                            formattedTexts.clear()
+                        }
+                    }
+                }
+            )
+        } catch (e: Exception) {
+        }
+
+        try {
+            patcher.patch(
+                Class.forName("com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemEmbed\$Companion\$getModel\$1")
+                    .getDeclaredMethod("call", Object::class.java, Object::class.java),
+                Hook { param ->
+                    val format = Format.valueOf(settings.getString("format", Format.DEFAULT.name))
+                    if (format == Format.DEFAULT) return@Hook
+
+                    if (!settings.getBool("displayInChat", true)) return@Hook
+
+                    @Suppress("UNCHECKED_CAST")
+                    val map = param.result as? MutableMap<Long, String> ?: return@Hook
+                    if (map.isEmpty()) return@Hook
+                    val users = StoreStream.getUsers().users
+                    for ((id, value) in map.entries) {
+                        val user = users[id] as? com.discord.models.user.User ?: continue
+                        val formatted = getFormatted(user.username, value, user)
+                        map[id] = formatted
+
+                        synchronized(formattedTexts) {
+                            formattedTexts.add(formatted)
+                            if (formattedTexts.size > 1000) {
+                                formattedTexts.clear()
+                            }
+                        }
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            try {
+                patcher.patch(
+                    WidgetChatListAdapterItemEmbed::class.java.getDeclaredMethod(
+                        "getModel",
+                        Any::class.java,
+                        Any::class.java
+                    ),
+                    Hook { param ->
+                        val format = Format.valueOf(settings.getString("format", Format.DEFAULT.name))
+                        if (format == Format.DEFAULT) return@Hook
+
+                        if (!settings.getBool("displayInChat", true)) return@Hook
+
+                        val mapResult = param.result as? MutableMap<*, *> ?: return@Hook
+                        if (mapResult.isEmpty()) return@Hook
+                        val users = StoreStream.getUsers().users
+                        for ((idAny, valueAny) in mapResult) {
+                            val id = idAny as? Long ?: continue
+                            val value = valueAny as? String ?: continue
+                            val user = users[id] as? User ?: continue
+                            val formatted = getFormatted(user.username, value, user)
+                            @Suppress("UNCHECKED_CAST")
+                            (mapResult as MutableMap<Any?, Any?>)[id] = formatted
+
+                            synchronized(formattedTexts) {
+                                formattedTexts.add(formatted)
+                                if (formattedTexts.size > 1000) {
+                                    formattedTexts.clear()
+                                }
+                            }
+                        }
+                    }
+                )
+            } catch (e2: Exception) {
+            }
+        }
+
+        try {
+            patcher.after<ChannelMembersListViewHolderMember>(
+                "bind",
+                ChannelMembersListAdapter.Item.Member::class.java,
+                Function0::class.java
+            ) { param ->
+                val format = Format.valueOf(settings.getString("format", Format.DEFAULT.name))
+                if (format == Format.DEFAULT) return@after
+
+                if (!settings.getBool("displayInMemberList", true)) return@after
+
+                val memberItem = param.args[0] as? ChannelMembersListAdapter.Item.Member ?: return@after
+                val memberHolder = param.thisObject as? ChannelMembersListViewHolderMember ?: return@after
+
+                try {
+                    val binding = ReflectionExtensions.getBinding(memberHolder)
+                    val usernameView = binding.f
+                    val usernameTextView = usernameView.j.c
+
+                    val memberUser = try {
+                        val userField = memberItem.javaClass.getDeclaredField("user")
+                        userField.isAccessible = true
+                        userField.get(memberItem) as? User
+                    } catch (e: Exception) {
+                        try {
+                            val userIdField = memberItem.javaClass.getDeclaredField("userId")
+                            userIdField.isAccessible = true
+                            val userId = userIdField.get(memberItem) as? Long
+                            userId?.let { StoreStream.getUsers().users[it] as? User }
+                        } catch (e2: Exception) {
+                            null
+                        }
+                    } ?: return@after
+
+                    val originalText = usernameTextView.text?.toString() ?: return@after
+                    val formatted = getFormatted(memberUser.username, originalText, memberUser)
+                    usernameTextView.text = formatted
+
+                    synchronized(formattedTexts) {
+                        formattedTexts.add(formatted)
+                        if (formattedTexts.size > 1000) {
+                            formattedTexts.clear()
+                        }
+                    }
+
+                    applyTextStyling(usernameTextView, formatted)
+
+                    if (settings.getBool("enableMarquee", false) && formatted.length > settings.getInt(
+                            "maxLength",
+                            20
+                        )
+                    ) {
+                        setMarquee(usernameTextView)
+                    }
+                } catch (_: Throwable) {
                 }
             }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun isUsernameFormat(text: String): Boolean {
+        val patterns = listOf(
+            ".*\\s+\\(.*\\)$".toRegex(),
+            ".*\\s+\\[.*\\]$".toRegex(),
+            ".*\\s+\\|\\s+.*$".toRegex(),
+            ".*\\s+•\\s+.*$".toRegex(),
+            ".*\\s+-\\s+.*$".toRegex()
         )
 
-        try {
-            val userNameFormatterClass = Class.forName("com.discord.widgets.user.UserNameFormatterKt")
-            val getSpannableMethod = userNameFormatterClass.getDeclaredMethod(
-                "getSpannableForUserNameWithDiscrim",
-                Class.forName("com.discord.models.user.User"),
-                String::class.java,
-                Context::class.java,
-                Int::class.java,
-                Int::class.java,
-                Int::class.java,
-                Int::class.java,
-                Int::class.java,
-                Int::class.java
+        val customSep = settings.getString("customSeparator", " - ")
+        if (customSep.isNotEmpty()) {
+            val customPattern = ".*\\Q${customSep}\\E.*".toRegex()
+            if (customPattern.matches(text)) return true
+        }
+
+        return patterns.any { it.matches(text) }
+    }
+
+    private fun setMarquee(textView: TextView?) {
+        textView?.apply {
+            ellipsize = TextUtils.TruncateAt.MARQUEE
+            marqueeRepeatLimit = -1
+            isSelected = true
+            isSingleLine = true
+            isHorizontalFadingEdgeEnabled = true
+            setHorizontallyScrolling(true)
+        }
+    }
+
+    private fun applyTextStyling(textView: TextView, text: String) {
+        val customTextSize = settings.getFloat("chatTextSize", 16f)
+        val adaptiveSizeEnabled = settings.getBool("enableAdaptiveSize", false)
+
+        if (adaptiveSizeEnabled) {
+            val optimalSize = calculateAdaptiveTextSize(textView, text, customTextSize)
+            textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, optimalSize)
+        } else {
+            textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, customTextSize)
+        }
+    }
+
+    private fun calculateAdaptiveTextSize(textView: TextView, text: String, baseSize: Float): Float {
+        val maxWidth = textView.width
+        if (maxWidth <= 0) return baseSize
+
+        val minSize = 8f
+        var currentSize = baseSize
+
+        val paint = Paint(textView.paint)
+
+        while (currentSize > minSize) {
+            paint.textSize = TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_SP,
+                currentSize,
+                textView.context.resources.displayMetrics
             )
-            patcher.patch(getSpannableMethod, Hook { param ->
-                val user = param.args[0] as? ModelUser ?: return@Hook
-                val username = user.username
-                val res = param.args[1] as? String ?: username
-                param.args[1] = getFormatted(username, res, user)
-            })
-        } catch (_: Throwable) {}
 
-
-        try {
-            val userProfileHeaderViewClass = Class.forName("com.discord.widgets.user.profile.UserProfileHeaderView")
-            val getSecondaryNameMethod = userProfileHeaderViewClass.getDeclaredMethod(
-                "getSecondaryNameTextForUser",
-                Class.forName("com.discord.models.user.User"),
-                Class.forName("com.discord.models.member.GuildMember")
-            )
-            patcher.patch(getSecondaryNameMethod, Hook { param ->
-                val user = param.args[0] as? ModelUser ?: return@Hook
-                val username = user.username
-                val res = param.result as? String ?: username
-                param.result = getFormatted(username, res, user)
-            })
-        } catch (_: Throwable) {}
-
-        try {
-            val userProfileHeaderViewClass = Class.forName("com.discord.widgets.user.profile.UserProfileHeaderView")
-            val configureSecondaryNameMethod = userProfileHeaderViewClass.declaredMethods.firstOrNull {
-                it.name == "configureSecondaryName" && it.parameterTypes.size == 1
+            val textWidth = paint.measureText(text)
+            if (textWidth <= maxWidth) {
+                break
             }
-            if (configureSecondaryNameMethod != null) {
-                patcher.patch(configureSecondaryNameMethod, Hook { param ->
-                    // No-op, prevents Discord from overriding the secondary name
-                })
+
+            currentSize -= 0.5f
+        }
+
+        return maxOf(currentSize, minSize)
+    }
+
+    object ReflectionExtensions {
+        private lateinit var memberBinding: Field
+
+        fun init() {
+            try {
+                memberBinding = ChannelMembersListViewHolderMember::class.java.getDeclaredField("binding").apply {
+                    isAccessible = true
+                }
+            } catch (_: Throwable) {
             }
-        } catch (_: Throwable) {}
+        }
+
+        fun getBinding(member: ChannelMembersListViewHolderMember): WidgetChannelMembersListItemUserBinding {
+            return memberBinding.get(member) as WidgetChannelMembersListItemUserBinding
+        }
     }
 
     init {
-        settingsTab = SettingsTab(PluginSettings::class.java, SettingsTab.Type.BOTTOM_SHEET).withArgs(settings)
+        settingsTab = SettingsTab(Settings::class.java, SettingsTab.Type.PAGE).withArgs(settings)
     }
-
-    class PluginSettings(private val settings: com.aliucord.api.SettingsAPI) : com.discord.app.AppBottomSheet() {
-        override fun getContentViewResId(): Int = 0
-
-        @SuppressLint("SetTextI18n")
-        override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
-            val context = inflater.context
-            val layout = com.aliucord.widgets.LinearLayout(context)
-            layout.setBackgroundColor(com.discord.utilities.color.ColorCompat.getThemedColor(context, com.lytefast.flexinput.R.b.colorBackgroundPrimary))
-
-            val radios = listOf(
-                com.aliucord.Utils.createCheckedSetting(context, com.discord.views.CheckedSetting.ViewType.RADIO, "Nickname (Username)", null),
-                com.aliucord.Utils.createCheckedSetting(context, com.discord.views.CheckedSetting.ViewType.RADIO, "Nickname (Tag)", null),
-                com.aliucord.Utils.createCheckedSetting(context, com.discord.views.CheckedSetting.ViewType.RADIO, "Username", null),
-                com.aliucord.Utils.createCheckedSetting(context, com.discord.views.CheckedSetting.ViewType.RADIO, "Username (Nickname)", null),
-                com.aliucord.Utils.createCheckedSetting(context, com.discord.views.CheckedSetting.ViewType.RADIO, "Display Name (Username)", null),
-                com.aliucord.Utils.createCheckedSetting(context, com.discord.views.CheckedSetting.ViewType.RADIO, "Display Name (Tag)", null),
-                com.aliucord.Utils.createCheckedSetting(context, com.discord.views.CheckedSetting.ViewType.RADIO, "Username (Display Name)", null)
-            )
-
-            val radioManager = com.discord.views.RadioManager(radios)
-            var format = Format.valueOf(settings.getString("format", Format.NICKNAME_USERNAME.name))
-
-            for ((i, radio) in radios.withIndex()) {
-                radio.e {
-                    settings.setString("format", Format.values()[i].name)
-                    radioManager.a(radio)
-                }
-                layout.addView(radio)
-                if (i == format.ordinal) radioManager.a(radio)
-            }
-
-            return layout
-        }
-    }    
 
     override fun stop(context: Context) {
         patcher.unpatchAll()
+        formattedTexts.clear()
     }
 
-    private fun getFormatted(username: String, res: String, user: ModelUser): String {
+    private fun getFormatted(username: String, res: String, user: User): String {
+        if (settings.getBool("formatOthersOnly", false)) {
+            val currentUser = StoreStream.getUsers().me
+            if (currentUser != null && currentUser.id == user.id) {
+                return res
+            }
+        }
+
         val displayName = user.globalName ?: username
-        return when (Format.valueOf(settings.getString("format", Format.NICKNAME_USERNAME.name))) {
-            Format.NICKNAME_USERNAME -> "$res ($username)"
-            Format.NICKNAME_TAG -> "$res ($username${UserUtils.INSTANCE.getDiscriminatorWithPadding(user)})"
-            Format.USERNAME -> username
-            Format.USERNAME_NICKNAME -> "$username ($res)"
-            Format.DISPLAYNAME_USERNAME -> "$displayName ($username)"
-            Format.DISPLAYNAME_TAG -> "$displayName ($username${UserUtils.INSTANCE.getDiscriminatorWithPadding(user)})"
-            Format.USERNAME_DISPLAYNAME -> "$username ($displayName)"
+        val format = Format.valueOf(settings.getString("format", Format.DEFAULT.name))
+
+        if (format == Format.DEFAULT) {
+            return res
+        }
+
+        val separator = try {
+            Separator.valueOf(settings.getString("separator", Separator.PARENTHESES.name))
+        } catch (e: IllegalArgumentException) {
+            settings.setString("separator", Separator.PARENTHESES.name)
+            Separator.PARENTHESES
+        }
+        val casing = CasingMode.valueOf(settings.getString("casing", CasingMode.NONE.name))
+        val maxLength = settings.getInt("maxLength", 20)
+        val smartConditional = settings.getBool("smartConditional", true)
+
+        val (primary, secondary) = when (format) {
+            Format.DEFAULT -> return res
+            Format.USERNAME -> return truncateText(applyCasing(username, casing), maxLength)
+            Format.DISPLAYNAME_USERNAME -> displayName to username
+            Format.USERNAME_DISPLAYNAME -> username to displayName
+            Format.NICKNAME_USERNAME -> res to username
+            Format.USERNAME_NICKNAME -> username to res
+        }
+
+        if (smartConditional && primary.equals(secondary, ignoreCase = true)) {
+            return truncateText(applyCasing(primary, casing), maxLength)
+        }
+
+        val primaryFormatted = applyCasing(primary, casing)
+        val secondaryFormatted = applyCasing(secondary, casing)
+
+        val combined = formatWithSeparator(primaryFormatted, secondaryFormatted, separator)
+
+        return truncateText(combined, maxLength)
+    }
+
+    private fun formatWithSeparator(primary: String, secondary: String, separator: Separator): String {
+        return when (separator) {
+            Separator.PARENTHESES -> "$primary ($secondary)"
+            Separator.BRACKETS -> "$primary [$secondary]"
+            Separator.PIPES -> "$primary | $secondary"
+            Separator.BULLETS -> "$primary • $secondary"
+            Separator.DASHES -> "$primary - $secondary"
+            Separator.CUSTOM -> {
+                val customSep = settings.getString("customSeparator", " - ")
+                "$primary$customSep$secondary"
+            }
+        }
+    }
+
+    private fun applyCasing(text: String, mode: CasingMode): String {
+        return when (mode) {
+            CasingMode.NONE -> text
+            CasingMode.PROPER_CASE -> text.split(" ").joinToString(" ") { word ->
+                if (word.isNotEmpty()) {
+                    word.first().uppercase() + word.drop(1).lowercase()
+                } else {
+                    word
+                }
+            }
+            CasingMode.LOWER_CASE -> text.lowercase()
+            CasingMode.UPPER_CASE -> text.uppercase()
+        }
+    }
+
+    private fun truncateText(text: String, maxLength: Int): String {
+        if (settings.getBool("enableMarquee", false) || settings.getBool("enableAdaptiveSize", false)) {
+            return text
+        }
+
+        return if (text.length > maxLength && maxLength > 3) {
+            text.take(maxLength - 3) + "..."
+        } else {
+            text
         }
     }
 }

@@ -48,28 +48,17 @@ class CleanChannels : Plugin() {
     override fun start(context: Context) {
         categoryId = getResId("channels_item_category_name")
         inputId = getResId("text_input")
-        
+
+        // Only target channel-specific elements, not general usernames or profiles
         val names = listOf(
             "channels_item_channel_name",
             "channels_item_voice_channel_name",
-            "channels_list_item_private_name",
             "stage_channel_item_voice_channel_name",
             "channels_item_thread_name",
             "channels_item_category_name",
             "toolbar_title",
-            "member_list_item_group_name",
-            "member_list_group_name",
-            "channel_members_list_item_header_name",
-            "member_list_header_text",
-            "member_list_channel_name",
-            "guild_channel_side_bar_header_title",
-            "chat_side_panel_header_title",
-            "widget_chat_side_panel_header_title",
             "channel_topic_name",
             "channel_topic_title",
-            "channels_list_item_text_actions_title",
-            "name",
-            "title",
             "text_input"
         )
         names.forEach { name ->
@@ -77,26 +66,33 @@ class CleanChannels : Plugin() {
             if (id != 0) targetIds.add(id)
         }
 
+        // Only hook Fragment views that are NOT profiles
         try {
             val appFragmentClass = Class.forName("com.discord.app.AppFragment")
             patcher.patch(appFragmentClass.getDeclaredMethod("onViewCreated", View::class.java, Bundle::class.java), Hook { cf ->
                 val root = cf.args?.getOrNull(0) as? View ?: return@Hook
+                val fragment = cf.thisObject
+
+                // Skip if this is a profile-related fragment
+                if (isProfileFragment(fragment)) return@Hook
+
                 root.post { walkAndClean(root) }
             })
         } catch (_: Throwable) {}
 
-        try {
-            val appBottomSheetClass = Class.forName("com.discord.app.AppBottomSheet")
-            patcher.patch(appBottomSheetClass.getDeclaredMethod("onViewCreated", View::class.java, Bundle::class.java), Hook { cf ->
-                val root = cf.args?.getOrNull(0) as? View ?: return@Hook
-                root.post { walkAndClean(root) }
-            })
-        } catch (_: Throwable) {}
+        // Skip AppBottomSheet entirely since profiles use bottom sheets
+        // Removed AppBottomSheet hook to avoid cleaning profiles
 
         try {
             val setTextHook = Hook { param ->
                 val tv = param.thisObject as? TextView ?: return@Hook
-                if (targetIds.contains(tv.id) || isHeader(tv)) {
+
+                // Only apply to specific channel-related IDs, not general usernames
+                if (targetIds.contains(tv.id)) {
+                    val text = param.args[0]?.toString() ?: ""
+                    if (isUsernameFormat(text)) return@Hook
+                    if (isInProfileContext(tv)) return@Hook
+
                     applyCleaningSafely(tv)
                     attachGuard(tv)
                 }
@@ -114,7 +110,9 @@ class CleanChannels : Plugin() {
             if (setDraweeMethod != null) {
                 patcher.patch(setDraweeMethod, Hook { param ->
                     val tv = param.thisObject as? TextView ?: return@Hook
-                    if (targetIds.contains(tv.id) || isHeader(tv)) {
+
+                    // Only apply to channel-specific IDs, skip if in profile context
+                    if (targetIds.contains(tv.id) && !isInProfileContext(tv)) {
                         val builder = param.args[0] as? CharSequence ?: return@Hook
                         val original = builder.toString()
                         val cleaned = cleanName(original, tv)
@@ -132,14 +130,12 @@ class CleanChannels : Plugin() {
             }
         } catch (_: Throwable) {}
 
-        val headerClasses = listOf(
-            "com.discord.widgets.home.WidgetHome",
-            "com.discord.widgets.chat.sidepanel.WidgetChatSidePanel",
+        // Only hook specific channel-related widgets, not user/profile widgets
+        val channelOnlyClasses = listOf(
             "com.discord.widgets.channels.WidgetChannelTopic",
-            "com.discord.app.AppActivity",
             "com.discord.widgets.channels.list.WidgetChannelsListItemChannelActions"
         )
-        headerClasses.forEach { className ->
+        channelOnlyClasses.forEach { className ->
             try {
                 val clazz = Class.forName(className)
                 clazz.declaredMethods.forEach { method ->
@@ -182,14 +178,14 @@ class CleanChannels : Plugin() {
             if (!showWhitelistToggle) return@after
             val guildId = it.args[0] as Long
             val fragment = it.thisObject as WidgetGuildProfileSheet
-            
+
             val binding = ReflectUtils.getMethodByArgs(WidgetGuildProfileSheet::class.java, "getBinding").invoke(fragment) as WidgetGuildProfileSheetBinding
             val layout = binding.f.getRootView() as ViewGroup
-            
+
             val secondaryActionsId = Utils.getResId("guild_profile_sheet_secondary_actions", "id")
             val container = layout.findViewById<View>(secondaryActionsId) as? ViewGroup ?: return@after
             val actionsLayout = container.getChildAt(0) as? LinearLayout ?: return@after
-            
+
             if (actionsLayout.findViewWithTag<View>("clean_channels_toggle") != null) return@after
 
             val context = actionsLayout.context
@@ -205,11 +201,11 @@ class CleanChannels : Plugin() {
                     settings.setObject("whitelist", whitelist)
                 }
             }
-            
+
             val changeNicknameId = Utils.getResId("guild_profile_sheet_change_nickname", "id")
             val changeNicknameView = actionsLayout.findViewById<View?>(changeNicknameId)
             val index = if (changeNicknameView != null) actionsLayout.indexOfChild(changeNicknameView) else 0
-            
+
             actionsLayout.addView(setting, index)
         }
     }
@@ -221,6 +217,62 @@ class CleanChannels : Plugin() {
         var fallbackId = ctx.resources.getIdentifier(name, "id", "com.discord")
         if (fallbackId == 0) fallbackId = ctx.resources.getIdentifier(name, "id", "com.discord.app")
         return fallbackId
+    }
+
+    // Detect if fragment is profile-related to avoid cleaning usernames/profiles
+    private fun isProfileFragment(fragment: Any): Boolean {
+        val className = fragment.javaClass.name
+        return className.contains("Profile") ||
+               className.contains("User") && !className.contains("Channel") ||
+               className.contains("Member") && !className.contains("List")
+    }
+
+    // Detect if TextView is in a profile context to avoid cleaning
+    private fun isInProfileContext(tv: TextView): Boolean {
+        var parent = tv.parent
+        while (parent != null && parent is View) {
+            val id = parent.id
+            if (id != 0 && id != View.NO_ID) {
+                try {
+                    val idName = parent.resources.getResourceEntryName(id)
+                    if (idName.contains("profile") ||
+                        idName.contains("user") && !idName.contains("channel") ||
+                        idName.contains("member") && !idName.contains("list")) {
+                        return true
+                    }
+                } catch (_: Throwable) {}
+            }
+
+            // Check class name of parent
+            val className = parent.javaClass.name
+            if (className.contains("Profile") ||
+                className.contains("User") && !className.contains("Channel")) {
+                return true
+            }
+
+            parent = parent.parent
+        }
+        return false
+    }
+
+    // IMPORTANT: Detect CustomNameFormat patterns to avoid interference
+    private fun isUsernameFormat(text: String): Boolean {
+        // Only match specific CustomNameFormat patterns to avoid being too broad
+        val usernamePatterns = listOf(
+            ".*\\s+\\(.*\\)$",      // Name (username)
+            ".*\\s+\\[.*\\]$",      // Name [username]
+            ".*\\s+\\|\\s+.*$",     // Name | username
+            ".*\\s+•\\s+.*$",       // Name • username
+            ".*\\s+-\\s+.*$"        // Name - username
+        )
+
+        return try {
+            usernamePatterns.any { pattern ->
+                text.matches(Regex(pattern))
+            } && text.length in 10..100 && text.count { it == ' ' } <= 3
+        } catch (e: Exception) {
+            false // If regex fails, don't treat as username format
+        }
     }
 
     private fun findAndCleanView(obj: Any) {
@@ -242,9 +294,13 @@ class CleanChannels : Plugin() {
 
     private fun walkAndClean(root: View) {
         if (root is TextView) {
-            if (targetIds.contains(root.id) || isHeader(root)) {
-                applyCleaningSafely(root)
-                attachGuard(root)
+            // Only clean specific channel-related IDs, not general usernames or profiles
+            if (targetIds.contains(root.id) && !isInProfileContext(root)) {
+                val text = root.text?.toString() ?: ""
+                if (!isUsernameFormat(text)) {
+                    applyCleaningSafely(root)
+                    attachGuard(root)
+                }
             }
         }
         if (root is ViewGroup) {
@@ -312,6 +368,9 @@ class CleanChannels : Plugin() {
 
         val text = original.toString()
         if (text.matches(Regex("^\\d+/\\d+$"))) return
+
+        // IMPORTANT: Don't interfere with CustomNameFormat username patterns
+        if (isUsernameFormat(text)) return
 
         val cleaned = cleanName(original, tv)
         if (cleaned != original.toString()) {
