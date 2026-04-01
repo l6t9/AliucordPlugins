@@ -255,7 +255,7 @@ class Settings(private val settings: com.aliucord.api.SettingsAPI) : SettingsPag
             context,
             CheckedSetting.ViewType.SWITCH,
             "Display in Member List",
-            "Show custom formatting in the right-side member list"
+            "Show custom formatting in the member list"
         )
         displayInMemberListToggle.isChecked = settings.getBool("displayInMemberList", true)
         displayInMemberListToggle.setOnCheckedListener { settings.setBool("displayInMemberList", it) }
