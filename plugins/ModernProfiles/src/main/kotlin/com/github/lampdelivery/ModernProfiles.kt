@@ -2,9 +2,11 @@ package com.github.lampdelivery
 
 import android.content.Context
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import androidx.annotation.RequiresApi
 import androidx.cardview.widget.CardView
 import androidx.core.widget.NestedScrollView
 import com.aliucord.annotations.AliucordPlugin
@@ -66,6 +68,7 @@ class ModernProfiles : Plugin() {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.M)
     override fun start(context: Context) {
         settingsTab = SettingsTab(Settings::class.java).withArgs(settings)
         StoreStream.getUserSettingsSystem()
@@ -147,6 +150,12 @@ class ModernProfiles : Plugin() {
                 } else {
                     intArrayOf(rawThemeColors[0], mixWithWhite(rawThemeColors[0], 0.12))
                 }
+
+                // Detect light mode - only if BOTH colors are very light (base1 > 0.7 AND base2 > 0.75)
+                val base1Lum = ColorUtils.getLuminance(themeColors[0])
+                val base2Lum = ColorUtils.getLuminance(themeColors.getOrElse(1) { themeColors[0] })
+                val isLightMode = base1Lum > 0.7 && base2Lum > 0.75
+
                 val binding = WidgetUserSheet.`access$getBinding$p`(this)
                 val actionsContainer = binding.D
                 val root = actionsContainer.parent.parent.parent as NestedScrollView
@@ -250,14 +259,12 @@ class ModernProfiles : Plugin() {
                     } catch (_: Throwable) {
                     }
                     try {
-                        if (android.os.Build.VERSION.SDK_INT >= 23) {
-                            if (v is android.widget.FrameLayout) {
+                        if (v is android.widget.FrameLayout) {
+                            v.foreground = null
+                        } else {
+                            try {
                                 v.foreground = null
-                            } else {
-                                try {
-                                    v.foreground = null
-                                } catch (_: Throwable) {
-                                }
+                            } catch (_: Throwable) {
                             }
                         }
                     } catch (_: Throwable) {
@@ -563,6 +570,9 @@ class ModernProfiles : Plugin() {
                                     btn.background = drawable
                                     btn.backgroundTintList = android.content.res.ColorStateList.valueOf(cardColor)
                                     btn.backgroundTintMode = android.graphics.PorterDuff.Mode.SRC_IN
+                                    btn.elevation = 0f
+                                    btn.stateListAnimator = null
+                                    btn.foreground = null
                                     btn.setPadding(
                                         (12 * density).toInt(),
                                         (8 * density).toInt(),
@@ -572,7 +582,9 @@ class ModernProfiles : Plugin() {
                                                 density
                                         ).toInt()
                                     )
-                                    (btn as? android.widget.TextView)?.setTextColor(android.graphics.Color.WHITE)
+                                    (btn as? android.widget.TextView)?.setTextColor(
+                                        if (isLightMode) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+                                    )
                                 } catch (_: Throwable) {
                                 }
                             }
@@ -818,11 +830,17 @@ class ModernProfiles : Plugin() {
                     themeColors[0]
                 }
                 val (bh, bs, bl) = rgbToHsl(baseColor)
-                val cardL = when {
-                    bl >= 0.75 -> (bl * 0.18).coerceIn(0.0, 1.0)
-                    bl >= 0.5 -> (bl * 0.28).coerceIn(0.0, 1.0)
-                    bl >= 0.25 -> (bl * 0.60).coerceIn(0.0, 1.0)
-                    else -> (bl * 1.05).coerceIn(0.0, 1.0)
+                val cardL = if (isLightMode) {
+                    // Light mode: keep cards light
+                    bl
+                } else {
+                    // Dark mode: darken cards significantly
+                    when {
+                        bl >= 0.75 -> (bl * 0.18).coerceIn(0.0, 1.0)
+                        bl >= 0.5 -> (bl * 0.28).coerceIn(0.0, 1.0)
+                        bl >= 0.25 -> (bl * 0.60).coerceIn(0.0, 1.0)
+                        else -> (bl * 1.05).coerceIn(0.0, 1.0)
+                    }
                 }
                 val cardS = (bs * 0.9).coerceIn(0.0, 1.0)
                 val cardShade = hslToRgb(bh, cardS, cardL)
@@ -842,12 +860,25 @@ class ModernProfiles : Plugin() {
                     }
                 }
                 findAllCards(root)
+
+                // Set text colors on card contents
+                fun setCardTextColor(v: View) {
+                    val textColor = if (isLightMode) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+                    if (v is android.widget.TextView) v.setTextColor(textColor)
+                    if (v is ViewGroup) {
+                        for (i in 0 until v.childCount) {
+                            setCardTextColor(v.getChildAt(i))
+                        }
+                    }
+                }
+
                 cardViews.forEach { card ->
                     if (card is CardView) {
                         card.setCardBackgroundColor(cardShade)
                         card.radius = 32f
                         card.cardElevation = 0f
                         card.maxCardElevation = 0f
+                        setCardTextColor(card)
                     }
                 }
 
@@ -864,6 +895,21 @@ class ModernProfiles : Plugin() {
                     val layer = android.graphics.drawable.LayerDrawable(arrayOf(backgroundDrawable, overlayDrawable))
                     root.background = layer
                 } catch (_: Throwable) {
+                }
+
+                // For light mode profiles, ensure all text is dark
+                if (isLightMode) {
+                    fun setAllTextColorsDark(v: View) {
+                        if (v is android.widget.TextView) {
+                            v.setTextColor(android.graphics.Color.BLACK)
+                        }
+                        if (v is ViewGroup) {
+                            for (i in 0 until v.childCount) {
+                                setAllTextColorsDark(v.getChildAt(i))
+                            }
+                        }
+                    }
+                    setAllTextColorsDark(root)
                 }
 
                 if (model.isMe) {
